@@ -1,3 +1,4 @@
+import argparse
 import os
 import tempfile
 
@@ -341,8 +342,26 @@ def connect_square_to_detection(detections, boxes, square):
 # --- Main pipeline ---
 
 
-def main():
-    image_path = "images/2.jpg"
+def main(image_path=None):
+    """Run the chess board analysis pipeline on the given image path.
+
+    Args:
+        image_path (str): Path to the chess board image to analyze.
+                          If None, the path will be read from command line arguments.
+    """
+    # Parse command line arguments if image_path not provided
+    if image_path is None:
+        parser = argparse.ArgumentParser(description="Chess Board Analysis")
+        parser.add_argument(
+            "--image",
+            "-i",
+            type=str,
+            required=True,
+            help="Path to the chess board image",
+        )
+        args = parser.parse_args()
+        image_path = args.image
+
     print(f"Starting chess board analysis on {image_path}")
 
     if not os.path.exists(image_path):
