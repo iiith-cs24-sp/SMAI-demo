@@ -282,9 +282,23 @@ def chess_pieces_detector(image):
     return detections, boxes
 
 
-def connect_square_to_detection(detections, boxes, square):
+def connect_square_to_detection(detections, boxes, square, assigned_pieces=None):
+    """Connect a square to a chess piece detection.
+
+    Args:
+        detections: Detected piece boxes as xyxy coordinates
+        boxes: Detection boxes with class information
+        square: The chess square polygon
+        assigned_pieces: Set of already assigned piece indices
+
+    Returns:
+        Chess piece notation ('p', 'K', etc.) or '1' for empty square
+    """
     if detections is None or boxes is None:
         return "1"  # Return empty square if no detections
+
+    if assigned_pieces is None:
+        assigned_pieces = set()
 
     di = {
         0: "b",
@@ -302,8 +316,24 @@ def connect_square_to_detection(detections, boxes, square):
     }
 
     list_of_iou = []
-    for i in detections:
-        box_x1, box_y1, box_x2, box_y2 = i[0], i[1], i[2], i[3]
+    piece_indices = []
+
+    # Get square's bottom y-coordinate for determining bottom placement
+    square_bottom = max(square[2][1], square[3][1])  # Bottom y-coordinate of square
+
+    for i, detection in enumerate(detections):
+        # Skip already assigned pieces
+        if i in assigned_pieces:
+            list_of_iou.append(0)
+            piece_indices.append(i)
+            continue
+
+        box_x1, box_y1, box_x2, box_y2 = (
+            detection[0],
+            detection[1],
+            detection[2],
+            detection[3],
+        )
 
         # cut high pieces
         if box_y2 - box_y1 > PIECE_HEIGHT_THRESHOLD:
@@ -322,15 +352,29 @@ def connect_square_to_detection(detections, boxes, square):
 
         try:
             iou = calculate_iou(box_complete, square)
+
+            # Use bottom box constraint - if the bottom of the piece is not in this square,
+            # we don't want to consider it (no matter how much it overlaps)
+            piece_bottom = box_y2
+
+            # If the piece's bottom is not close to the square's bottom, reduce the IoU
+            if abs(piece_bottom - square_bottom) > SQUARE_SZ / CHESSBOARD_SIZE / 2:
+                iou = iou * 0.1  # Heavily penalize non-bottom placements
+
             list_of_iou.append(iou)
+            piece_indices.append(i)
         except Exception as e:
             print(f"Error calculating IOU: {e}")
             list_of_iou.append(0)
+            piece_indices.append(i)
 
     if not list_of_iou or max(list_of_iou) <= SQUARE_PIECE_IOU_THRESHOLD:
         return "1"
 
-    num = int(np.argmax(list_of_iou))
+    num_idx = int(np.argmax(list_of_iou))
+    num = piece_indices[num_idx]
+    assigned_pieces.add(num)  # Mark this piece as assigned
+
     try:
         piece = int(boxes.cls[num].item())
         return di.get(piece, "1")
@@ -417,22 +461,55 @@ def main(image_path=None):
             line.append(square)
         FEN_annotation.append(line)
 
-    # Detect pieces for each square
-    print("Mapping detected pieces to squares")
-    board_FEN = []
-    for line in FEN_annotation:
-        line_to_FEN = []
-        for square in line:
-            piece_on_square = connect_square_to_detection(detections, boxes, square)
-            line_to_FEN.append(piece_on_square)
+    # Process squares from bottom to top to ensure tall pieces are assigned to bottom squares first
+    # Create a flat list of all squares with their position info
+    all_squares = []
+    for row_idx, line in enumerate(FEN_annotation):
+        for col_idx, square in enumerate(line):
+            # Store square with its position information
+            all_squares.append((square, row_idx, col_idx))
 
-        print(line_to_FEN)
-        board_FEN.append(line_to_FEN)
+    # Sort squares by row in descending order (bottom to top)
+    all_squares.sort(key=lambda x: -x[1])
 
-    complete_board_FEN = ["".join(line) for line in board_FEN]
+    # Initialize tracking of assigned pieces
+    assigned_pieces = set()
+
+    # Process squares and build the board representation
+    board_FEN = [["1" for _ in range(CHESSBOARD_SIZE)] for _ in range(CHESSBOARD_SIZE)]
+
+    print("Mapping detected pieces to squares (bottom to top)")
+    for square, row_idx, col_idx in all_squares:
+        piece_on_square = connect_square_to_detection(
+            detections, boxes, square, assigned_pieces
+        )
+        board_FEN[row_idx][col_idx] = piece_on_square
+        if piece_on_square != "1":
+            print(
+                f"Assigned {piece_on_square} to square at row {row_idx}, col {col_idx}"
+            )
+
+    # Display the board (in the same orientation we built it)
+    print("\nDetected board layout (internal representation):")
+    for row in board_FEN:
+        print(row)
+
+    # FIXED: Board is flipped both horizontally and vertically, so we need to:
+    # 1. Reverse each row (fix horizontal flip)
+    # 2. Reverse the order of rows (fix vertical flip)
+    board_FEN_corrected = []
+    for row in board_FEN:
+        # Reverse each row to fix horizontal flip
+        board_FEN_corrected.append(list(reversed(row)))
+
+    # Reverse the rows to fix vertical flip
+    board_FEN_reversed = list(reversed(board_FEN_corrected))
+
+    # Convert to FEN notation
+    complete_board_FEN = ["".join(line) for line in board_FEN_reversed]
     to_FEN = "/".join(complete_board_FEN)
 
-    print("\nFinal FEN notation:")
+    print("\nFinal FEN notation (after fixing horizontal and vertical orientation):")
     print(to_FEN)
     print("\nView board at:")
     print("https://lichess.org/analysis/" + to_FEN)
