@@ -1,10 +1,10 @@
 import os
+import tempfile
 
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.pyplot import figure
-from numpy import asarray
 from PIL import Image
 from shapely.geometry import Polygon
 from ultralytics import YOLO
@@ -13,15 +13,37 @@ from ultralytics import YOLO
 
 
 def order_points(pts):
-    # Orders 4 points: [top-left, top-right, bottom-right, bottom-left]
-    rect = np.zeros((4, 2), dtype="float32")
+    """Order four points into TL,TR,BR,BL as in the training code"""
     s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]
-    rect[2] = pts[np.argmax(s)]
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]
-    rect[3] = pts[np.argmax(diff)]
-    return rect
+    diff = np.diff(pts, axis=1).ravel()
+    return np.array(
+        [
+            pts[np.argmin(s)],  # TL
+            pts[np.argmin(diff)],  # TR
+            pts[np.argmax(s)],  # BR
+            pts[np.argmax(diff)],  # BL
+        ],
+        dtype="float32",
+    )
+
+
+def warp_bbox(bbox, M):
+    """Warp a bounding-box under perspective M (same as training code)"""
+    # bbox = [x1,y1,x2,y2]
+    pts = np.array(
+        [
+            [
+                [bbox[0], bbox[1]],
+                [bbox[0], bbox[3]],
+                [bbox[2], bbox[1]],
+                [bbox[2], bbox[3]],
+            ]
+        ],
+        dtype="float32",
+    )
+    warped = cv2.perspectiveTransform(pts, M)[0]
+    xs, ys = warped[:, 0], ys[:, 1]
+    return xs.min(), ys.min(), xs.max(), ys.max()
 
 
 def calculate_iou(box_1, box_2):
@@ -39,7 +61,6 @@ def calculate_iou(box_1, box_2):
 
 def detect_corners(image_path):
     print("Loading corner detection model...")
-    # Use absolute paths to ensure model loading works correctly
     model_path = os.path.abspath(os.path.join("models", "corners-best-7k.pt"))
     if not os.path.exists(model_path):
         print(f"ERROR: Corner model not found at {model_path}")
@@ -79,40 +100,49 @@ def detect_corners(image_path):
 
 
 def four_point_transform(image_path, pts):
+    """Transform using the same padding approach as in training"""
     if pts is None:
         print("Cannot perform transformation without corner points")
         return None
 
-    img = Image.open(image_path)
-    image = asarray(img)
-    rect = order_points(pts)
-    (tl, tr, br, bl) = rect
-    widthA = np.linalg.norm(br - bl)
-    widthB = np.linalg.norm(tr - tl)
-    maxWidth = max(int(widthA), int(widthB))
-    heightA = np.linalg.norm(tr - br)
-    heightB = np.linalg.norm(tl - bl)
-    maxHeight = max(int(heightA), int(heightB))
+    # Constants matching the training preprocessing
+    SQUARE_SZ = 800  # size of warped board
+    pad_cells = 1
+    pad_px = SQUARE_SZ // 8 * pad_cells
+    out_sz = SQUARE_SZ + 2 * pad_px
+
+    # Read the image
+    img = cv2.imread(image_path)
+    if img is None:
+        print(f"Failed to load image: {image_path}")
+        return None
+
+    # Source corners (from corner detection)
+    src = order_points(pts)
+
+    # Destination quad with positive padding (exactly as in training)
     dst = np.array(
-        [[0, 0], [maxWidth - 1, 0], [maxWidth - 1, maxHeight - 1], [0, maxHeight - 1]],
+        [
+            [pad_px, pad_px],  # TL
+            [SQUARE_SZ + pad_px, pad_px],  # TR
+            [SQUARE_SZ + pad_px, SQUARE_SZ + pad_px],  # BR
+            [pad_px, SQUARE_SZ + pad_px],  # BL
+        ],
         dtype="float32",
     )
 
-    # Print information about the transformation
-    print(f"Transforming image from points {rect} to standard rectangle")
-    print(f"New dimensions: {maxWidth}x{maxHeight}")
-
-    M = cv2.getPerspectiveTransform(rect, dst)
-    warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight))
+    # Perform perspective transform
+    M = cv2.getPerspectiveTransform(src, dst)
+    warped = cv2.warpPerspective(img, M, (out_sz, out_sz))
 
     # Display the warped image
     plt.figure(figsize=(8, 8))
-    plt.imshow(warped)
-    plt.title("Perspective Transformed Image")
+    plt.imshow(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
+    plt.title("Perspective Transformed Image (with padding)")
     plt.axis("off")
     plt.show()
 
-    return Image.fromarray(warped)
+    return Image.fromarray(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
 
 
 def plot_grid_on_transformed_image(image):
@@ -125,16 +155,17 @@ def plot_grid_on_transformed_image(image):
     corners = order_points(corners)
     figure(figsize=(10, 10), dpi=80)
     plt.imshow(image)
-    plt.title("Grid Overlay on Transformed Image")
+    plt.title("Grid Overlay on Transformed Image (10x10 with padding)")
 
     TL, TR, BR, BL = corners
 
     def interpolate(xy0, xy1):
         x0, y0 = xy0
         x1, y1 = xy1
-        dx = (x1 - x0) / 8
-        dy = (y1 - y0) / 8
-        return [(x0 + i * dx, y0 + i * dy) for i in range(9)]
+        # Create 10x10 grid instead of 8x8 to account for padding
+        dx = (x1 - x0) / 10
+        dy = (y1 - y0) / 10
+        return [(x0 + i * dx, y0 + i * dy) for i in range(11)]  # 11 points for 10 cells
 
     ptsT = interpolate(TL, TR)
     ptsL = interpolate(TL, BL)
@@ -145,6 +176,12 @@ def plot_grid_on_transformed_image(image):
         plt.plot([a[0], b[0]], [a[1], b[1]], "r-", linestyle="--")
     for a, b in zip(ptsT, ptsB):
         plt.plot([a[0], b[0]], [a[1], b[1]], "r-", linestyle="--")
+
+    # Mark the actual chess area (8x8 within the padding)
+    plt.plot([ptsT[1][0], ptsT[9][0]], [ptsT[1][1], ptsT[9][1]], "b-", linewidth=2)
+    plt.plot([ptsB[1][0], ptsB[9][0]], [ptsB[1][1], ptsB[9][1]], "b-", linewidth=2)
+    plt.plot([ptsL[1][0], ptsL[9][0]], [ptsL[1][1], ptsL[9][1]], "b-", linewidth=2)
+    plt.plot([ptsR[1][0], ptsR[9][0]], [ptsR[1][1], ptsR[9][1]], "b-", linewidth=2)
 
     plt.axis("off")
     plt.savefig("chessboard_transformed_with_grid.jpg")
@@ -159,10 +196,7 @@ def chess_pieces_detector(image):
         return None, None
 
     print("Loading chess piece detection model...")
-    # Use absolute paths to ensure model loading works correctly
-    model_path = os.path.abspath(
-        os.path.join("models", "piece-recog-shiram-chessrender360.pt")
-    )
+    model_path = os.path.abspath(os.path.join("models", "piece-recog-ankita.pt"))
     if not os.path.exists(model_path):
         print(f"ERROR: Piece detection model not found at {model_path}")
         print(f"Looking for: {model_path}")
@@ -171,14 +205,18 @@ def chess_pieces_detector(image):
     model = YOLO(model_path)
 
     # Save the PIL image to a temporary file
-    import tempfile
-
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
         print(f"Saving image to temp file: {tmp.name}")
         image.save(tmp.name)
-        print("Running piece detection with confidence threshold 0.25...")
-        # Lower confidence threshold to make detection easier
-        results = model.predict(source=tmp.name, conf=0.25, verbose=True)
+        print("Running piece detection with settings from training...")
+        # Match training parameters
+        results = model.predict(
+            source=tmp.name,
+            conf=0.25,  # confidence threshold
+            iou=0.45,  # IoU threshold
+            imgsz=640,  # image size for inference
+            verbose=True,
+        )
 
     if results is None or len(results) == 0:
         print("No results from piece detection!")
@@ -192,30 +230,12 @@ def chess_pieces_detector(image):
     print(f"Detected {len(boxes)} pieces")
     detections = boxes.xyxy.cpu().numpy()
 
-    # Display detected pieces
-    img_np = np.array(image)
+    # Display detected pieces with annotated image from results
+    annotated = results[0].plot()
+    annotated = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
     plt.figure(figsize=(10, 10))
-    plt.imshow(img_np)
+    plt.imshow(annotated)
     plt.title(f"Detected {len(boxes)} Chess Pieces")
-
-    # Use detection class names if available
-    class_names = model.names if hasattr(model, "names") else None
-
-    for i, box in enumerate(detections):
-        x1, y1, x2, y2 = box[:4]
-        rect = plt.Rectangle(
-            (x1, y1), x2 - x1, y2 - y1, fill=False, color="lime", linewidth=2
-        )
-        plt.gca().add_patch(rect)
-
-        # Add class label if available
-        if class_names and boxes.cls is not None:
-            cls_id = int(boxes.cls[i].item())
-            label = f"{class_names[cls_id]}: {boxes.conf[i].item():.2f}"
-            plt.text(
-                x1, y1 - 5, label, fontsize=8, bbox=dict(facecolor="yellow", alpha=0.5)
-            )
-
     plt.axis("off")
     plt.tight_layout()
     plt.show()
@@ -297,7 +317,7 @@ def main():
         print("Could not proceed due to corner detection failure")
         return
 
-    # Step 2: Transform perspective
+    # Step 2: Transform perspective with padding (matching training preprocessing)
     transformed_image = four_point_transform(image_path, corners)
     if transformed_image is None:
         print("Could not proceed due to perspective transform failure")
@@ -315,10 +335,10 @@ def main():
         print("Could not proceed due to piece detection failure")
         return
 
-    # Calculate grid points
-    print("Creating chessboard grid")
-    x = [ptsT[i][0] for i in range(9)]
-    y = [ptsL[i][1] for i in range(9)]
+    # Calculate grid points - using points 1-9 (skipping the padding)
+    print("Creating chessboard grid from internal 8x8 region")
+    x = [ptsT[i][0] for i in range(1, 10)]  # Skip padding, use indices 1-9
+    y = [ptsL[i][1] for i in range(1, 10)]  # Skip padding, use indices 1-9
 
     # Build all 64 squares
     FEN_annotation = []
@@ -345,11 +365,8 @@ def main():
             piece_on_square = connect_square_to_detection(detections, boxes, square)
             line_to_FEN.append(piece_on_square)
 
-        corrected_FEN = (
-            line_to_FEN  # No need to replace 'empty' as we're using '1' directly
-        )
-        print(corrected_FEN)
-        board_FEN.append(corrected_FEN)
+        print(line_to_FEN)
+        board_FEN.append(line_to_FEN)
 
     complete_board_FEN = ["".join(line) for line in board_FEN]
     to_FEN = "/".join(complete_board_FEN)
