@@ -9,6 +9,22 @@ from PIL import Image
 from shapely.geometry import Polygon
 from ultralytics import YOLO
 
+# --- Constants ---
+CHESSBOARD_SIZE = 8  # Number of squares on each side of a chessboard
+SQUARE_SZ = 800  # Size of warped board
+GRID_SIZE = 10  # Number of grid cells (including padding)
+GRID_POINTS = GRID_SIZE + 1  # Number of points on grid (11 points for 10 cells)
+CORNER_DETECTION_CONF_THRESHOLD = 0.08  # Confidence threshold for corner detection
+PIECE_DETECTION_CONF_THRESHOLD = 0.25  # Confidence threshold for piece detection
+PIECE_DETECTION_IOU_THRESHOLD = 0.45  # IoU threshold for piece detection
+PIECE_DETECTION_IMG_SIZE = 640  # Image size for piece detection inference
+PIECE_HEIGHT_THRESHOLD = 60  # Threshold for considering a piece "high"
+PIECE_HEIGHT_ADJUSTMENT = 40  # Adjustment for high pieces
+SQUARE_PIECE_IOU_THRESHOLD = 0.15  # Minimum IoU to consider a piece on a square
+PADDING_START_INDEX = 1  # Index where padding ends and board begins
+PADDING_END_INDEX = 9  # Index where board ends and padding begins
+PLOT_LINEWIDTH = 2  # Line width for plotting
+
 # --- Utility functions ---
 
 
@@ -68,7 +84,9 @@ def detect_corners(image_path):
 
     model = YOLO(model_path)
     print(f"Detecting corners in {image_path}...")
-    results = model.predict(source=image_path, conf=0.08, verbose=True)
+    results = model.predict(
+        source=image_path, conf=CORNER_DETECTION_CONF_THRESHOLD, verbose=True
+    )
 
     # Visualize corner detection results
     img = cv2.imread(image_path)
@@ -106,9 +124,8 @@ def four_point_transform(image_path, pts):
         return None
 
     # Constants matching the training preprocessing
-    SQUARE_SZ = 800  # size of warped board
     pad_cells = 1
-    pad_px = SQUARE_SZ // 8 * pad_cells
+    pad_px = SQUARE_SZ // CHESSBOARD_SIZE * pad_cells
     out_sz = SQUARE_SZ + 2 * pad_px
 
     # Read the image
@@ -162,10 +179,11 @@ def plot_grid_on_transformed_image(image):
     def interpolate(xy0, xy1):
         x0, y0 = xy0
         x1, y1 = xy1
-        # Create 10x10 grid instead of 8x8 to account for padding
-        dx = (x1 - x0) / 10
-        dy = (y1 - y0) / 10
-        return [(x0 + i * dx, y0 + i * dy) for i in range(11)]  # 11 points for 10 cells
+        dx = (x1 - x0) / GRID_SIZE
+        dy = (y1 - y0) / GRID_SIZE
+        return [
+            (x0 + i * dx, y0 + i * dy) for i in range(GRID_POINTS)
+        ]  # 11 points for 10 cells
 
     ptsT = interpolate(TL, TR)
     ptsL = interpolate(TL, BL)
@@ -178,10 +196,30 @@ def plot_grid_on_transformed_image(image):
         plt.plot([a[0], b[0]], [a[1], b[1]], "r-", linestyle="--")
 
     # Mark the actual chess area (8x8 within the padding)
-    plt.plot([ptsT[1][0], ptsT[9][0]], [ptsT[1][1], ptsT[9][1]], "b-", linewidth=2)
-    plt.plot([ptsB[1][0], ptsB[9][0]], [ptsB[1][1], ptsB[9][1]], "b-", linewidth=2)
-    plt.plot([ptsL[1][0], ptsL[9][0]], [ptsL[1][1], ptsL[9][1]], "b-", linewidth=2)
-    plt.plot([ptsR[1][0], ptsR[9][0]], [ptsR[1][1], ptsR[9][1]], "b-", linewidth=2)
+    plt.plot(
+        [ptsT[PADDING_START_INDEX][0], ptsT[PADDING_END_INDEX][0]],
+        [ptsT[PADDING_START_INDEX][1], ptsT[PADDING_END_INDEX][1]],
+        "b-",
+        linewidth=PLOT_LINEWIDTH,
+    )
+    plt.plot(
+        [ptsB[PADDING_START_INDEX][0], ptsB[PADDING_END_INDEX][0]],
+        [ptsB[PADDING_START_INDEX][1], ptsB[PADDING_END_INDEX][1]],
+        "b-",
+        linewidth=PLOT_LINEWIDTH,
+    )
+    plt.plot(
+        [ptsL[PADDING_START_INDEX][0], ptsL[PADDING_END_INDEX][0]],
+        [ptsL[PADDING_START_INDEX][1], ptsL[PADDING_END_INDEX][1]],
+        "b-",
+        linewidth=PLOT_LINEWIDTH,
+    )
+    plt.plot(
+        [ptsR[PADDING_START_INDEX][0], ptsR[PADDING_END_INDEX][0]],
+        [ptsR[PADDING_START_INDEX][1], ptsR[PADDING_END_INDEX][1]],
+        "b-",
+        linewidth=PLOT_LINEWIDTH,
+    )
 
     plt.axis("off")
     plt.savefig("chessboard_transformed_with_grid.jpg")
@@ -212,9 +250,9 @@ def chess_pieces_detector(image):
         # Match training parameters
         results = model.predict(
             source=tmp.name,
-            conf=0.25,  # confidence threshold
-            iou=0.45,  # IoU threshold
-            imgsz=640,  # image size for inference
+            conf=PIECE_DETECTION_CONF_THRESHOLD,  # confidence threshold
+            iou=PIECE_DETECTION_IOU_THRESHOLD,  # IoU threshold
+            imgsz=PIECE_DETECTION_IMG_SIZE,  # image size for inference
             verbose=True,
         )
 
@@ -267,11 +305,11 @@ def connect_square_to_detection(detections, boxes, square):
         box_x1, box_y1, box_x2, box_y2 = i[0], i[1], i[2], i[3]
 
         # cut high pieces
-        if box_y2 - box_y1 > 60:
+        if box_y2 - box_y1 > PIECE_HEIGHT_THRESHOLD:
             box_complete = np.array(
                 [
-                    [box_x1, box_y1 + 40],
-                    [box_x2, box_y1 + 40],
+                    [box_x1, box_y1 + PIECE_HEIGHT_ADJUSTMENT],
+                    [box_x2, box_y1 + PIECE_HEIGHT_ADJUSTMENT],
                     [box_x2, box_y2],
                     [box_x1, box_y2],
                 ]
@@ -288,7 +326,7 @@ def connect_square_to_detection(detections, boxes, square):
             print(f"Error calculating IOU: {e}")
             list_of_iou.append(0)
 
-    if not list_of_iou or max(list_of_iou) <= 0.15:
+    if not list_of_iou or max(list_of_iou) <= SQUARE_PIECE_IOU_THRESHOLD:
         return "1"
 
     num = int(np.argmax(list_of_iou))
@@ -337,14 +375,18 @@ def main():
 
     # Calculate grid points - using points 1-9 (skipping the padding)
     print("Creating chessboard grid from internal 8x8 region")
-    x = [ptsT[i][0] for i in range(1, 10)]  # Skip padding, use indices 1-9
-    y = [ptsL[i][1] for i in range(1, 10)]  # Skip padding, use indices 1-9
+    x = [
+        ptsT[i][0] for i in range(PADDING_START_INDEX, PADDING_END_INDEX + 1)
+    ]  # Skip padding, use indices 1-9
+    y = [
+        ptsL[i][1] for i in range(PADDING_START_INDEX, PADDING_END_INDEX + 1)
+    ]  # Skip padding, use indices 1-9
 
     # Build all 64 squares
     FEN_annotation = []
-    for row in range(8):
+    for row in range(CHESSBOARD_SIZE):
         line = []
-        for col in range(8):
+        for col in range(CHESSBOARD_SIZE):
             square = np.array(
                 [
                     [x[col], y[row]],
