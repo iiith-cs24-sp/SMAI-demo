@@ -489,27 +489,14 @@ def main(image_path=None):
                 f"Assigned {piece_on_square} to square at row {row_idx}, col {col_idx}"
             )
 
-    # Display the board (in the same orientation we built it)
-    print("\nDetected board layout (internal representation):")
+    # Display the board
     for row in board_FEN:
         print(row)
 
-    # FIXED: Board is flipped both horizontally and vertically, so we need to:
-    # 1. Reverse each row (fix horizontal flip)
-    # 2. Reverse the order of rows (fix vertical flip)
-    board_FEN_corrected = []
-    for row in board_FEN:
-        # Reverse each row to fix horizontal flip
-        board_FEN_corrected.append(list(reversed(row)))
-
-    # Reverse the rows to fix vertical flip
-    board_FEN_reversed = list(reversed(board_FEN_corrected))
-
-    # Convert to FEN notation
-    complete_board_FEN = ["".join(line) for line in board_FEN_reversed]
+    complete_board_FEN = ["".join(line) for line in board_FEN]
     to_FEN = "/".join(complete_board_FEN)
 
-    print("\nFinal FEN notation (after fixing horizontal and vertical orientation):")
+    print("\nFinal FEN notation:")
     print(to_FEN)
     print("\nView board at:")
     print("https://lichess.org/analysis/" + to_FEN)
