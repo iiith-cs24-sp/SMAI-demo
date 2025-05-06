@@ -2,6 +2,8 @@ import argparse
 import os
 import tempfile
 import time
+import glob
+import sys
 
 import cv2
 import matplotlib.pyplot as plt
@@ -77,15 +79,49 @@ def calculate_iou(box_1, box_2):
 # --- Pipeline steps ---
 
 
-def detect_corners(image_path, corner_model_path, show_plots):
+def load_models(corner_model_path, piece_model_path):
+    """Load corner and piece detection models once.
+
+    Args:
+        corner_model_path (str): Path to the corner detection model.
+        piece_model_path (str): Path to the piece detection model.
+
+    Returns:
+        tuple: (corner_model, piece_model) or None if loading failed
+    """
     print("Loading corner detection model...")
     if not os.path.exists(corner_model_path):
         print(f"ERROR: Corner model not found at {corner_model_path}")
-        return None
+        return None, None
 
-    model = YOLO(corner_model_path)
+    try:
+        corner_model = YOLO(corner_model_path)
+        corner_model.fuse()  # Fuse model layers for faster inference
+        corner_model.eval()  # Set model to evaluation mode
+    except Exception as e:
+        print(f"Failed to load corner model: {e}")
+        return None, None
+
+    print("Loading chess piece detection model...")
+    if not os.path.exists(piece_model_path):
+        print(f"ERROR: Piece detection model not found at {piece_model_path}")
+        return None, None
+
+    try:
+        piece_model = YOLO(piece_model_path)
+        piece_model.fuse()  # Fuse model layers for faster inference
+        piece_model.eval()  # Set model to evaluation mode
+    except Exception as e:
+        print(f"Failed to load piece model: {e}")
+        return None, None
+
+    return corner_model, piece_model
+
+
+def detect_corners(image_path, corner_model, show_plots):
+    """Detect corners using a pre-loaded model."""
     print(f"Detecting corners in {image_path}...")
-    results = model.predict(
+    results = corner_model.predict(
         source=image_path, conf=CORNER_DETECTION_CONF_THRESHOLD, verbose=True
     )
 
@@ -232,18 +268,11 @@ def plot_grid_on_transformed_image(image, show_plots):
     return ptsT, ptsL
 
 
-def chess_pieces_detector(image, piece_model_path, show_plots):
+def chess_pieces_detector(image, piece_model, show_plots):
+    """Detect chess pieces using a pre-loaded model."""
     if image is None:
         print("Cannot detect pieces on a None image")
         return None, None
-
-    print("Loading chess piece detection model...")
-    if not os.path.exists(piece_model_path):
-        print(f"ERROR: Piece detection model not found at {piece_model_path}")
-        print(f"Looking for: {piece_model_path}")
-        return None, None
-
-    model = YOLO(piece_model_path)
 
     # Save the PIL image to a temporary file
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
@@ -251,7 +280,7 @@ def chess_pieces_detector(image, piece_model_path, show_plots):
         image.save(tmp.name)
         print("Running piece detection with settings from training...")
         # Match training parameters
-        results = model.predict(
+        results = piece_model.predict(
             source=tmp.name,
             conf=PIECE_DETECTION_CONF_THRESHOLD,  # confidence threshold
             iou=PIECE_DETECTION_IOU_THRESHOLD,  # IoU threshold
@@ -386,50 +415,50 @@ def connect_square_to_detection(detections, boxes, square, assigned_pieces):
         return "1"
 
 
-# --- Main pipeline ---
-
-
-def pipeline(image_path, corner_model_path, piece_model_path, show_plots):
-    """Run the chess board analysis pipeline on the given image path.
+def process_image(image_path, corner_model, piece_model, show_plots):
+    """Process a single chess board image using pre-loaded models.
 
     Args:
         image_path (str): Path to the chess board image to analyze.
-        corner_model_path (str): Path to the corner detection model.
-        piece_model_path (str): Path to the piece detection model.
+        corner_model: Pre-loaded corner detection model.
+        piece_model: Pre-loaded piece detection model.
         show_plots (bool): Whether to display matplotlib plots.
+
+    Returns:
+        str: FEN notation of the board or None if processing failed
     """
-    print(f"Starting chess board analysis on {image_path}")
+    print(f"\nProcessing image: {image_path}")
     start = time.time()
 
     if not os.path.exists(image_path):
         print(f"ERROR: Image not found at {image_path}")
-        return
+        return None
 
     # Step 1: Detect corners
-    corners = detect_corners(image_path, corner_model_path, show_plots)
+    corners = detect_corners(image_path, corner_model, show_plots)
     if corners is None:
         print("Could not proceed due to corner detection failure")
-        return
+        return None
 
     # Step 2: Transform perspective with padding (matching training preprocessing)
     transformed_image = four_point_transform(image_path, corners, show_plots)
     if transformed_image is None:
         print("Could not proceed due to perspective transform failure")
-        return
+        return None
 
     # Step 3: Plot grid
     ptsT, ptsL = plot_grid_on_transformed_image(transformed_image, show_plots)
     if ptsT is None or ptsL is None:
         print("Could not proceed due to grid plotting failure")
-        return
+        return None
 
     # Step 4: Detect chess pieces
     detections, boxes = chess_pieces_detector(
-        transformed_image, piece_model_path, show_plots
+        transformed_image, piece_model, show_plots
     )
     if detections is None:
         print("Could not proceed due to piece detection failure")
-        return
+        return None
 
     # Calculate grid points - using points 1-9 (skipping the padding)
     print("Creating chessboard grid from internal 8x8 region")
@@ -499,6 +528,86 @@ def pipeline(image_path, corner_model_path, piece_model_path, show_plots):
     end = time.time()
     print(f"Total time taken: {end - start:.2f} seconds")
 
+    return to_FEN
+
+
+def process_folder(folder_path, corner_model_path, piece_model_path, show_plots):
+    """Process all images in a folder.
+
+    Args:
+        folder_path (str): Path to folder containing chess board images.
+        corner_model_path (str): Path to the corner detection model.
+        piece_model_path (str): Path to the piece detection model.
+        show_plots (bool): Whether to display matplotlib plots.
+    """
+    if not os.path.isdir(folder_path):
+        print(f"ERROR: Folder not found at {folder_path}")
+        return
+
+    print(f"Processing all images in folder: {folder_path}")
+    start_total = time.time()
+
+    # Load models once
+    corner_model, piece_model = load_models(corner_model_path, piece_model_path)
+    if corner_model is None or piece_model is None:
+        print("Failed to load models, aborting batch processing")
+        return
+
+    # Get all image files
+    image_files = []
+    for ext in ["jpg", "jpeg", "png", "bmp", "tif", "tiff"]:
+        image_files.extend(glob.glob(os.path.join(folder_path, f"*.{ext}")))
+        image_files.extend(glob.glob(os.path.join(folder_path, f"*.{ext.upper()}")))
+
+    # Make the list unique
+    image_files = list(set(image_files))
+
+    if not image_files:
+        print(f"No image files found in {folder_path}")
+        return
+
+    print(f"Found {len(image_files)} images to process")
+
+    # Process each image
+    results = {}
+    for i, image_path in enumerate(image_files):
+        print(
+            f"\n[{i + 1}/{len(image_files)}] Processing {os.path.basename(image_path)}"
+        )
+        fen = process_image(image_path, corner_model, piece_model, show_plots)
+        if fen:
+            results[image_path] = fen
+
+    # Summary
+    end_total = time.time()
+    print("\n=== Summary ===")
+    print(f"Processed {len(results)}/{len(image_files)} images successfully")
+    print(f"Total batch processing time: {end_total - start_total:.2f} seconds")
+
+    # Write results to file
+    result_file = os.path.join(folder_path, "chess_results.txt")
+    with open(result_file, "w") as f:
+        for img_path, fen in results.items():
+            f.write(
+                f"{os.path.basename(img_path)}: {fen}\t Link: https://lichess.org/analysis/{fen}\n"
+            )
+
+    print(f"Results saved to {result_file}")
+
+
+def pipeline(image_path, corner_model_path, piece_model_path, show_plots):
+    """Run the chess board analysis pipeline on the given image path."""
+    print(f"Starting chess board analysis on {image_path}")
+
+    # Load models
+    corner_model, piece_model = load_models(corner_model_path, piece_model_path)
+    if corner_model is None or piece_model is None:
+        print("Failed to load models, aborting processing")
+        return
+
+    # Process the image
+    process_image(image_path, corner_model, piece_model, show_plots)
+
 
 if __name__ == "__main__":
     # Parse command line arguments
@@ -507,8 +616,13 @@ if __name__ == "__main__":
         "--image",
         "-i",
         type=str,
-        required=True,
         help="Path to the chess board image",
+    )
+    parser.add_argument(
+        "--folder",
+        "-f",
+        type=str,
+        help="Path to folder containing chess board images",
     )
     parser.add_argument(
         "--corner-model",
@@ -529,5 +643,16 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # Run the main pipeline with parsed arguments
-    pipeline(args.image, args.corner_model, args.piece_model, not args.no_display)
+    # Check that at least one of image or folder is provided
+    if not args.image and not args.folder:
+        print("ERROR: Either --image or --folder must be specified")
+        parser.print_help()
+        sys.exit(1)
+
+    # Run processing based on input type
+    if args.folder:
+        process_folder(
+            args.folder, args.corner_model, args.piece_model, not args.no_display
+        )
+    else:
+        pipeline(args.image, args.corner_model, args.piece_model, not args.no_display)
