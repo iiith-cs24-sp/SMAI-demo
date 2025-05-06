@@ -333,18 +333,18 @@ def connect_square_to_detection(detections, boxes, square, assigned_pieces):
         assigned_pieces = set()
 
     di = {
-        0: "b",
-        1: "k",
-        2: "n",
-        3: "p",
-        4: "q",
-        5: "r",
-        6: "B",
-        7: "K",
-        8: "N",
-        9: "P",
-        10: "Q",
-        11: "R",
+        0: "Q",  # white_queen
+        1: "K",  # white_king
+        2: "B",  # white_bishop
+        3: "N",  # white_knight
+        4: "R",  # white_rook
+        5: "P",  # white_pawn
+        6: "q",  # black_queen
+        7: "k",  # black_king
+        8: "b",  # black_bishop
+        9: "n",  # black_knight
+        10: "r",  # black_rook
+        11: "p",  # black_pawn
     }
 
     list_of_iou = []
@@ -636,7 +636,9 @@ if __name__ == "__main__":
         "-p",
         type=str,
         help="Path to piece detection model",
-        default=os.path.abspath(os.path.join("models", "piece-recog-ankita.pt")),
+        default=os.path.abspath(
+            os.path.join("models", "piece-recog-shiram-chessrender360.pt")
+        ),
     )
     parser.add_argument(
         "--no-display", "-nd", action="store_true", help="Disable displaying plots"
