@@ -4,7 +4,7 @@ This demonstrates our pipeline for processing chess games.
 
 Inference pipeline:
 
-picture -> corners model -> warp transform ->  piece detection
+picture -> corners model -> warp transform ->  piece detection
 
 ## How to use
 
@@ -41,6 +41,24 @@ To run any script, append `uv run` before the `python` command. (If the environm
 
 ```bash
 uv run python src/hello.py
+```
+
+### Running the Chess Analysis Pipeline
+
+Run the pipeline with default settings:
+
+```bash
+python pipeline.py --image path/to/your/chess/image.jpg
+```
+
+Additional command line arguments:
+
+```bash
+# Specify custom model paths
+python pipeline.py --image path/to/image.jpg --corner-model path/to/corner/model.pt --piece-model path/to/piece/model.pt
+
+# Disable plot display (useful for automation)
+python pipeline.py --image path/to/image.jpg --no-display
 ```
 
 Run tests:

@@ -1,6 +1,7 @@
 import argparse
 import os
 import tempfile
+import time
 
 import cv2
 import matplotlib.pyplot as plt
@@ -76,14 +77,13 @@ def calculate_iou(box_1, box_2):
 # --- Pipeline steps ---
 
 
-def detect_corners(image_path):
+def detect_corners(image_path, corner_model_path, show_plots):
     print("Loading corner detection model...")
-    model_path = os.path.abspath(os.path.join("models", "corners-best-7k.pt"))
-    if not os.path.exists(model_path):
-        print(f"ERROR: Corner model not found at {model_path}")
+    if not os.path.exists(corner_model_path):
+        print(f"ERROR: Corner model not found at {corner_model_path}")
         return None
 
-    model = YOLO(model_path)
+    model = YOLO(corner_model_path)
     print(f"Detecting corners in {image_path}...")
     results = model.predict(
         source=image_path, conf=CORNER_DETECTION_CONF_THRESHOLD, verbose=True
@@ -114,11 +114,12 @@ def detect_corners(image_path):
         plt.text(x, y, str(i), fontsize=12, color="white")
 
     plt.axis("off")
-    plt.show()
+    if show_plots:
+        plt.show()
     return corners
 
 
-def four_point_transform(image_path, pts):
+def four_point_transform(image_path, pts, show_plots):
     """Transform using the same padding approach as in training"""
     if pts is None:
         print("Cannot perform transformation without corner points")
@@ -158,12 +159,13 @@ def four_point_transform(image_path, pts):
     plt.imshow(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
     plt.title("Perspective Transformed Image (with padding)")
     plt.axis("off")
-    plt.show()
+    if show_plots:
+        plt.show()
 
     return Image.fromarray(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
 
 
-def plot_grid_on_transformed_image(image):
+def plot_grid_on_transformed_image(image, show_plots):
     if image is None:
         print("Cannot plot grid on a None image")
         return None, None
@@ -224,24 +226,24 @@ def plot_grid_on_transformed_image(image):
 
     plt.axis("off")
     plt.savefig("chessboard_transformed_with_grid.jpg")
-    plt.show()
+    if show_plots:
+        plt.show()
 
     return ptsT, ptsL
 
 
-def chess_pieces_detector(image):
+def chess_pieces_detector(image, piece_model_path, show_plots):
     if image is None:
         print("Cannot detect pieces on a None image")
         return None, None
 
     print("Loading chess piece detection model...")
-    model_path = os.path.abspath(os.path.join("models", "piece-recog-ankita.pt"))
-    if not os.path.exists(model_path):
-        print(f"ERROR: Piece detection model not found at {model_path}")
-        print(f"Looking for: {model_path}")
+    if not os.path.exists(piece_model_path):
+        print(f"ERROR: Piece detection model not found at {piece_model_path}")
+        print(f"Looking for: {piece_model_path}")
         return None, None
 
-    model = YOLO(model_path)
+    model = YOLO(piece_model_path)
 
     # Save the PIL image to a temporary file
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
@@ -277,12 +279,13 @@ def chess_pieces_detector(image):
     plt.title(f"Detected {len(boxes)} Chess Pieces")
     plt.axis("off")
     plt.tight_layout()
-    plt.show()
+    if show_plots:
+        plt.show()
 
     return detections, boxes
 
 
-def connect_square_to_detection(detections, boxes, square, assigned_pieces=None):
+def connect_square_to_detection(detections, boxes, square, assigned_pieces):
     """Connect a square to a chess piece detection.
 
     Args:
@@ -386,52 +389,44 @@ def connect_square_to_detection(detections, boxes, square, assigned_pieces=None)
 # --- Main pipeline ---
 
 
-def main(image_path=None):
+def pipeline(image_path, corner_model_path, piece_model_path, show_plots):
     """Run the chess board analysis pipeline on the given image path.
 
     Args:
         image_path (str): Path to the chess board image to analyze.
-                          If None, the path will be read from command line arguments.
+        corner_model_path (str): Path to the corner detection model.
+        piece_model_path (str): Path to the piece detection model.
+        show_plots (bool): Whether to display matplotlib plots.
     """
-    # Parse command line arguments if image_path not provided
-    if image_path is None:
-        parser = argparse.ArgumentParser(description="Chess Board Analysis")
-        parser.add_argument(
-            "--image",
-            "-i",
-            type=str,
-            required=True,
-            help="Path to the chess board image",
-        )
-        args = parser.parse_args()
-        image_path = args.image
-
     print(f"Starting chess board analysis on {image_path}")
+    start = time.time()
 
     if not os.path.exists(image_path):
         print(f"ERROR: Image not found at {image_path}")
         return
 
     # Step 1: Detect corners
-    corners = detect_corners(image_path)
+    corners = detect_corners(image_path, corner_model_path, show_plots)
     if corners is None:
         print("Could not proceed due to corner detection failure")
         return
 
     # Step 2: Transform perspective with padding (matching training preprocessing)
-    transformed_image = four_point_transform(image_path, corners)
+    transformed_image = four_point_transform(image_path, corners, show_plots)
     if transformed_image is None:
         print("Could not proceed due to perspective transform failure")
         return
 
     # Step 3: Plot grid
-    ptsT, ptsL = plot_grid_on_transformed_image(transformed_image)
+    ptsT, ptsL = plot_grid_on_transformed_image(transformed_image, show_plots)
     if ptsT is None or ptsL is None:
         print("Could not proceed due to grid plotting failure")
         return
 
     # Step 4: Detect chess pieces
-    detections, boxes = chess_pieces_detector(transformed_image)
+    detections, boxes = chess_pieces_detector(
+        transformed_image, piece_model_path, show_plots
+    )
     if detections is None:
         print("Could not proceed due to piece detection failure")
         return
@@ -501,6 +496,38 @@ def main(image_path=None):
     print("\nView board at:")
     print("https://lichess.org/analysis/" + to_FEN)
 
+    end = time.time()
+    print(f"Total time taken: {end - start:.2f} seconds")
+
 
 if __name__ == "__main__":
-    main()
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Chess Board Analysis")
+    parser.add_argument(
+        "--image",
+        "-i",
+        type=str,
+        required=True,
+        help="Path to the chess board image",
+    )
+    parser.add_argument(
+        "--corner-model",
+        "-c",
+        type=str,
+        help="Path to corner detection model",
+        default=os.path.abspath(os.path.join("models", "corners-best-7k.pt")),
+    )
+    parser.add_argument(
+        "--piece-model",
+        "-p",
+        type=str,
+        help="Path to piece detection model",
+        default=os.path.abspath(os.path.join("models", "piece-recog-ankita.pt")),
+    )
+    parser.add_argument(
+        "--no-display", "-nd", action="store_true", help="Disable displaying plots"
+    )
+    args = parser.parse_args()
+
+    # Run the main pipeline with parsed arguments
+    pipeline(args.image, args.corner_model, args.piece_model, not args.no_display)
