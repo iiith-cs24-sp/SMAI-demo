@@ -314,7 +314,9 @@ def chess_pieces_detector(image, piece_model, show_plots):
     return detections, boxes
 
 
-def connect_square_to_detection(detections, boxes, square, assigned_pieces):
+def connect_square_to_detection(
+    detections, boxes, square, assigned_pieces, piece_notation_map
+):
     """Connect a square to a chess piece detection.
 
     Args:
@@ -322,6 +324,7 @@ def connect_square_to_detection(detections, boxes, square, assigned_pieces):
         boxes: Detection boxes with class information
         square: The chess square polygon
         assigned_pieces: Set of already assigned piece indices
+        piece_notation_map: Dictionary mapping class indices to chess notation
 
     Returns:
         Chess piece notation ('p', 'K', etc.) or '1' for empty square
@@ -331,21 +334,6 @@ def connect_square_to_detection(detections, boxes, square, assigned_pieces):
 
     if assigned_pieces is None:
         assigned_pieces = set()
-
-    di = {
-        0: "Q",  # white_queen
-        1: "K",  # white_king
-        2: "B",  # white_bishop
-        3: "N",  # white_knight
-        4: "R",  # white_rook
-        5: "P",  # white_pawn
-        6: "q",  # black_queen
-        7: "k",  # black_king
-        8: "b",  # black_bishop
-        9: "n",  # black_knight
-        10: "r",  # black_rook
-        11: "p",  # black_pawn
-    }
 
     list_of_iou = []
     piece_indices = []
@@ -409,7 +397,7 @@ def connect_square_to_detection(detections, boxes, square, assigned_pieces):
 
     try:
         piece = int(boxes.cls[num].item())
-        return di.get(piece, "1")
+        return piece_notation_map.get(piece, "1")
     except Exception as e:
         print(f"Error getting piece class: {e}")
         return "1"
@@ -460,6 +448,83 @@ def process_image(image_path, corner_model, piece_model, show_plots):
         print("Could not proceed due to piece detection failure")
         return None
 
+    print(piece_model.names)
+
+    # Create a mapping from model class indices to chess notation
+    piece_notation_map = {}
+    if hasattr(piece_model, "names"):
+        print(piece_model.names)
+
+        # Create mapping from class names to FEN notation - support both naming conventions
+        chess_notation = {
+            # Hyphenated names
+            "white-queen": "Q",
+            "white-king": "K",
+            "white-bishop": "B",
+            "white-knight": "N",
+            "white-rook": "R",
+            "white-pawn": "P",
+            "black-queen": "q",
+            "black-king": "k",
+            "black-bishop": "b",
+            "black-knight": "n",
+            "black-rook": "r",
+            "black-pawn": "p",
+            # Underscore names
+            "white_queen": "Q",
+            "white_king": "K",
+            "white_bishop": "B",
+            "white_knight": "N",
+            "white_rook": "R",
+            "white_pawn": "P",
+            "black_queen": "q",
+            "black_king": "k",
+            "black_bishop": "b",
+            "black_knight": "n",
+            "black_rook": "r",
+            "black_pawn": "p",
+        }
+
+        # Map each class index to its FEN notation
+        for idx, name in piece_model.names.items():
+            # Normalize name by converting to lowercase
+            normalized_name = name.lower()
+
+            # Try direct lookup first
+            if normalized_name in chess_notation:
+                piece_notation_map[idx] = chess_notation[normalized_name]
+            else:
+                # Try replacing hyphens with underscores and vice versa
+                alt_name_underscore = normalized_name.replace("-", "_")
+                alt_name_hyphen = normalized_name.replace("_", "-")
+
+                if alt_name_underscore in chess_notation:
+                    piece_notation_map[idx] = chess_notation[alt_name_underscore]
+                elif alt_name_hyphen in chess_notation:
+                    piece_notation_map[idx] = chess_notation[alt_name_hyphen]
+                else:
+                    print(f"Warning: Unknown piece class '{name}' at index {idx}")
+                    piece_notation_map[idx] = "1"  # Default to empty square
+
+        print(f"Loaded class mapping from model: {piece_notation_map}")
+    else:
+        # Fallback to hardcoded mapping if model doesn't provide names
+        piece_notation_map = {
+            0: "Q",
+            1: "K",
+            2: "B",
+            3: "N",
+            4: "R",
+            5: "P",
+            6: "q",
+            7: "k",
+            8: "b",
+            9: "n",
+            10: "r",
+            11: "p",
+        }
+        print("Using default class mapping (model did not provide names)")
+
     # Calculate grid points - using points 1-9 (skipping the padding)
     print("Creating chessboard grid from internal 8x8 region")
     x = [
@@ -505,7 +570,7 @@ def process_image(image_path, corner_model, piece_model, show_plots):
     print("Mapping detected pieces to squares (bottom to top)")
     for square, row_idx, col_idx in all_squares:
         piece_on_square = connect_square_to_detection(
-            detections, boxes, square, assigned_pieces
+            detections, boxes, square, assigned_pieces, piece_notation_map
         )
         board_FEN[row_idx][col_idx] = piece_on_square
         if piece_on_square != "1":
