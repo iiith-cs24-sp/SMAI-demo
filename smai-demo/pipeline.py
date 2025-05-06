@@ -4,6 +4,8 @@ import tempfile
 import time
 import glob
 import sys
+import concurrent.futures
+from functools import lru_cache
 
 import cv2
 import matplotlib.pyplot as plt
@@ -62,7 +64,7 @@ def warp_bbox(bbox, M):
         dtype="float32",
     )
     warped = cv2.perspectiveTransform(pts, M)[0]
-    xs, ys = warped[:, 0], ys[:, 1]
+    xs, ys = warped[:, 0], warped[:, 1]
     return xs.min(), ys.min(), xs.max(), ys.max()
 
 
@@ -121,37 +123,55 @@ def load_models(corner_model_path, piece_model_path):
 def detect_corners(image_path, corner_model, show_plots):
     """Detect corners using a pre-loaded model."""
     print(f"Detecting corners in {image_path}...")
-    results = corner_model.predict(
-        source=image_path, conf=CORNER_DETECTION_CONF_THRESHOLD, verbose=True
-    )
 
-    # Visualize corner detection results
+    # Read image directly to avoid potential unnecessary conversions
     img = cv2.imread(image_path)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    plt.figure(figsize=(10, 10))
-    plt.imshow(img)
-    plt.title("Original image with detected corners")
-
-    boxes = results[0].boxes
-    if len(boxes) == 0:
-        print("No corners detected!")
+    if img is None:
+        print(f"Failed to load image: {image_path}")
         return None
 
-    arr = boxes.xywh.cpu().numpy()
-    points = arr[:, 0:2]
-    # Draw detected corners
-    for x, y in points:
-        plt.plot(x, y, "ro", markersize=10)
+    # Use direct image rather than loading from path again
+    results = corner_model.predict(
+        source=img, conf=CORNER_DETECTION_CONF_THRESHOLD, verbose=False
+    )
 
-    corners = order_points(points)
-    # Draw ordered corners with labels
-    for i, (x, y) in enumerate(corners):
-        plt.plot(x, y, "go", markersize=15)
-        plt.text(x, y, str(i), fontsize=12, color="white")
-
-    plt.axis("off")
+    # Visualize corner detection results only if needed
     if show_plots:
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        plt.figure(figsize=(10, 10))
+        plt.imshow(img_rgb)
+        plt.title("Original image with detected corners")
+
+        boxes = results[0].boxes
+        if len(boxes) == 0:
+            print("No corners detected!")
+            plt.close()
+            return None
+
+        arr = boxes.xywh.cpu().numpy()
+        points = arr[:, 0:2]
+        # Draw detected corners
+        for x, y in points:
+            plt.plot(x, y, "ro", markersize=10)
+
+        corners = order_points(points)
+        # Draw ordered corners with labels
+        for i, (x, y) in enumerate(corners):
+            plt.plot(x, y, "go", markersize=15)
+            plt.text(x, y, str(i), fontsize=12, color="white")
+
+        plt.axis("off")
         plt.show()
+    else:
+        boxes = results[0].boxes
+        if len(boxes) == 0:
+            print("No corners detected!")
+            return None
+
+        arr = boxes.xywh.cpu().numpy()
+        points = arr[:, 0:2]
+        corners = order_points(points)
+
     return corners
 
 
@@ -190,15 +210,16 @@ def four_point_transform(image_path, pts, show_plots):
     M = cv2.getPerspectiveTransform(src, dst)
     warped = cv2.warpPerspective(img, M, (out_sz, out_sz))
 
-    # Display the warped image
-    plt.figure(figsize=(8, 8))
-    plt.imshow(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
-    plt.title("Perspective Transformed Image (with padding)")
-    plt.axis("off")
+    # Display the warped image only if requested
     if show_plots:
+        plt.figure(figsize=(8, 8))
+        plt.imshow(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
+        plt.title("Perspective Transformed Image (with padding)")
+        plt.axis("off")
         plt.show()
 
-    return Image.fromarray(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
+    # Return directly as numpy array, no need for PIL conversion
+    return warped
 
 
 def plot_grid_on_transformed_image(image, show_plots):
@@ -206,12 +227,15 @@ def plot_grid_on_transformed_image(image, show_plots):
         print("Cannot plot grid on a None image")
         return None, None
 
-    w, h = image.size
+    # Get dimensions from numpy array directly without conversion
+    h, w = image.shape[:2]
     corners = np.array([[0, 0], [w, 0], [w, h], [0, h]])
     corners = order_points(corners)
-    figure(figsize=(10, 10), dpi=80)
-    plt.imshow(image)
-    plt.title("Grid Overlay on Transformed Image (10x10 with padding)")
+
+    if show_plots:
+        figure(figsize=(10, 10), dpi=80)
+        plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        plt.title("Grid Overlay on Transformed Image (10x10 with padding)")
 
     TL, TR, BR, BL = corners
 
@@ -229,40 +253,42 @@ def plot_grid_on_transformed_image(image, show_plots):
     ptsR = interpolate(TR, BR)
     ptsB = interpolate(BL, BR)
 
-    for a, b in zip(ptsL, ptsR):
-        plt.plot([a[0], b[0]], [a[1], b[1]], "r-", linestyle="--")
-    for a, b in zip(ptsT, ptsB):
-        plt.plot([a[0], b[0]], [a[1], b[1]], "r-", linestyle="--")
-
-    # Mark the actual chess area (8x8 within the padding)
-    plt.plot(
-        [ptsT[PADDING_START_INDEX][0], ptsT[PADDING_END_INDEX][0]],
-        [ptsT[PADDING_START_INDEX][1], ptsT[PADDING_END_INDEX][1]],
-        "b-",
-        linewidth=PLOT_LINEWIDTH,
-    )
-    plt.plot(
-        [ptsB[PADDING_START_INDEX][0], ptsB[PADDING_END_INDEX][0]],
-        [ptsB[PADDING_START_INDEX][1], ptsB[PADDING_END_INDEX][1]],
-        "b-",
-        linewidth=PLOT_LINEWIDTH,
-    )
-    plt.plot(
-        [ptsL[PADDING_START_INDEX][0], ptsL[PADDING_END_INDEX][0]],
-        [ptsL[PADDING_START_INDEX][1], ptsL[PADDING_END_INDEX][1]],
-        "b-",
-        linewidth=PLOT_LINEWIDTH,
-    )
-    plt.plot(
-        [ptsR[PADDING_START_INDEX][0], ptsR[PADDING_END_INDEX][0]],
-        [ptsR[PADDING_START_INDEX][1], ptsR[PADDING_END_INDEX][1]],
-        "b-",
-        linewidth=PLOT_LINEWIDTH,
-    )
-
-    plt.axis("off")
-    plt.savefig("chessboard_transformed_with_grid.jpg")
     if show_plots:
+        for a, b in zip(ptsL, ptsR):
+            plt.plot([a[0], b[0]], [a[1], b[1]], "r-", linestyle="--")
+        for a, b in zip(ptsT, ptsB):
+            plt.plot([a[0], b[0]], [a[1], b[1]], "r-", linestyle="--")
+
+        # Mark the actual chess area (8x8 within the padding)
+        plt.plot(
+            [ptsT[PADDING_START_INDEX][0], ptsT[PADDING_END_INDEX][0]],
+            [ptsT[PADDING_START_INDEX][1], ptsT[PADDING_END_INDEX][1]],
+            "b-",
+            linewidth=PLOT_LINEWIDTH,
+        )
+        plt.plot(
+            [ptsB[PADDING_START_INDEX][0], ptsB[PADDING_END_INDEX][0]],
+            [ptsB[PADDING_START_INDEX][1], ptsB[PADDING_END_INDEX][1]],
+            "b-",
+            linewidth=PLOT_LINEWIDTH,
+        )
+        plt.plot(
+            [ptsL[PADDING_START_INDEX][0], ptsL[PADDING_END_INDEX][0]],
+            [ptsL[PADDING_START_INDEX][1], ptsL[PADDING_END_INDEX][1]],
+            "b-",
+            linewidth=PLOT_LINEWIDTH,
+        )
+        plt.plot(
+            [ptsR[PADDING_START_INDEX][0], ptsR[PADDING_END_INDEX][0]],
+            [ptsR[PADDING_START_INDEX][1], ptsR[PADDING_END_INDEX][1]],
+            "b-",
+            linewidth=PLOT_LINEWIDTH,
+        )
+
+        plt.axis("off")
+        if not os.path.exists("output"):
+            os.makedirs("output")
+        plt.savefig("output/chessboard_transformed_with_grid.jpg")
         plt.show()
 
     return ptsT, ptsL
@@ -274,19 +300,16 @@ def chess_pieces_detector(image, piece_model, show_plots):
         print("Cannot detect pieces on a None image")
         return None, None
 
-    # Save the PIL image to a temporary file
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-        print(f"Saving image to temp file: {tmp.name}")
-        image.save(tmp.name)
-        print("Running piece detection with settings from training...")
-        # Match training parameters
-        results = piece_model.predict(
-            source=tmp.name,
-            conf=PIECE_DETECTION_CONF_THRESHOLD,  # confidence threshold
-            iou=PIECE_DETECTION_IOU_THRESHOLD,  # IoU threshold
-            imgsz=PIECE_DETECTION_IMG_SIZE,  # image size for inference
-            verbose=True,
-        )
+    # Use numpy array directly and avoid temporary file
+    print("Running piece detection with settings from training...")
+    # Match training parameters
+    results = piece_model.predict(
+        source=image,  # Pass numpy array directly
+        conf=PIECE_DETECTION_CONF_THRESHOLD,  # confidence threshold
+        iou=PIECE_DETECTION_IOU_THRESHOLD,  # IoU threshold
+        imgsz=PIECE_DETECTION_IMG_SIZE,  # image size for inference
+        verbose=False,  # Reduce logging for speed
+    )
 
     if results is None or len(results) == 0:
         print("No results from piece detection!")
@@ -300,18 +323,181 @@ def chess_pieces_detector(image, piece_model, show_plots):
     print(f"Detected {len(boxes)} pieces")
     detections = boxes.xyxy.cpu().numpy()
 
-    # Display detected pieces with annotated image from results
-    annotated = results[0].plot()
-    annotated = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-    plt.figure(figsize=(10, 10))
-    plt.imshow(annotated)
-    plt.title(f"Detected {len(boxes)} Chess Pieces")
-    plt.axis("off")
-    plt.tight_layout()
+    # Print detailed class information for debugging
+    if hasattr(piece_model, "names"):
+        classes = boxes.cls.cpu().numpy()
+        for i, cls in enumerate(classes):
+            cls_idx = int(cls)
+            class_name = piece_model.names.get(cls_idx, f"Unknown-{cls_idx}")
+            x1, y1, x2, y2 = detections[i]
+            conf = boxes.conf[i].item()
+            print(
+                f"  Piece {i}: Class={cls_idx} ({class_name}), Confidence={conf:.3f}, Box=[{int(x1)},{int(y1)},{int(x2)},{int(y2)}]"
+            )
+
+    # Display detected pieces with annotated image from results only if needed
     if show_plots:
+        annotated = results[0].plot()
+        plt.figure(figsize=(10, 10))
+        plt.imshow(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB))
+        plt.title(f"Detected {len(boxes)} Chess Pieces")
+        plt.axis("off")
+        plt.tight_layout()
         plt.show()
 
     return detections, boxes
+
+
+@lru_cache(maxsize=8)
+def get_piece_notation_map(piece_model):
+    """Cache the piece notation map for reuse"""
+    # Create a mapping from model class indices to chess notation
+    piece_notation_map = {}
+    if hasattr(piece_model, "names"):
+        print("Model class names:")
+        for idx, name in piece_model.names.items():
+            print(f"  Class {idx}: {name}")
+
+        # Create mapping from class names to FEN notation - support both naming conventions
+        chess_notation = {
+            # Hyphenated names
+            "white-queen": "Q",
+            "white-king": "K",
+            "white-bishop": "B",
+            "white-knight": "N",
+            "white-rook": "R",
+            "white-pawn": "P",
+            "black-queen": "q",
+            "black-king": "k",
+            "black-bishop": "b",
+            "black-knight": "n",
+            "black-rook": "r",
+            "black-pawn": "p",
+            # Underscore names
+            "white_queen": "Q",
+            "white_king": "K",
+            "white_bishop": "B",
+            "white_knight": "N",
+            "white_rook": "R",
+            "white_pawn": "P",
+            "black_queen": "q",
+            "black_king": "k",
+            "black_bishop": "b",
+            "black_knight": "n",
+            "black_rook": "r",
+            "black_pawn": "p",
+            # Common variations or typos
+            "w-king": "K",
+            "w-queen": "Q",
+            "w-bishop": "B",
+            "w-knight": "N",
+            "w-rook": "R",
+            "w-pawn": "P",
+            "b-king": "k",
+            "b-queen": "q",
+            "b-bishop": "b",
+            "b-knight": "n",
+            "b-rook": "r",
+            "b-pawn": "p",
+            "wking": "K",
+            "wqueen": "Q",
+            "wbishop": "B",
+            "wknight": "N",
+            "wrook": "R",
+            "wpawn": "P",
+            "bking": "k",
+            "bqueen": "q",
+            "bbishop": "b",
+            "bknight": "n",
+            "brook": "r",
+            "bpawn": "p",
+        }
+
+        # Special case for known problematic classes based on observed issues
+        special_cases = {
+            # If you know the exact class index for the white king, add it here
+            # For example, if the white king is consistently misclassified:
+            # 2: "K",  # Force class 2 to be recognized as white king
+        }
+
+        # Map each class index to its FEN notation
+        for idx, name in piece_model.names.items():
+            # Check special cases first
+            if idx in special_cases:
+                piece_notation_map[idx] = special_cases[idx]
+                print(
+                    f"  Applied special case mapping for class {idx}: {name} → {special_cases[idx]}"
+                )
+                continue
+
+            # Normalize name by converting to lowercase
+            normalized_name = name.lower()
+
+            # Try direct lookup first
+            if normalized_name in chess_notation:
+                piece_notation_map[idx] = chess_notation[normalized_name]
+            else:
+                # Try replacing hyphens with underscores and vice versa
+                alt_name_underscore = normalized_name.replace("-", "_")
+                alt_name_hyphen = normalized_name.replace("_", "-")
+
+                if alt_name_underscore in chess_notation:
+                    piece_notation_map[idx] = chess_notation[alt_name_underscore]
+                elif alt_name_hyphen in chess_notation:
+                    piece_notation_map[idx] = chess_notation[alt_name_hyphen]
+                else:
+                    print(f"Warning: Unknown piece class '{name}' at index {idx}")
+                    piece_notation_map[idx] = "1"  # Default to empty square
+
+        print(f"Loaded class mapping from model: {piece_notation_map}")
+    else:
+        # Fallback to hardcoded mapping if model doesn't provide names
+        # Adjusted default mapping to ensure white king is correctly mapped
+        piece_notation_map = {
+            0: "Q",  # white queen
+            1: "K",  # white king
+            2: "B",  # white bishop
+            3: "N",  # white knight
+            4: "R",  # white rook
+            5: "P",  # white pawn
+            6: "q",  # black queen
+            7: "k",  # black king
+            8: "b",  # black bishop
+            9: "n",  # black knight
+            10: "r",  # black rook
+            11: "p",  # black pawn
+        }
+        print("Using default class mapping (model did not provide names)")
+
+    # Add a verification step for the king piece
+    has_white_king = "K" in piece_notation_map.values()
+    has_black_king = "k" in piece_notation_map.values()
+
+    if not has_white_king:
+        print(
+            "WARNING: No white king (K) found in piece mapping! This will cause incorrect FEN notation."
+        )
+        # Try to find the class most likely to be the white king
+        for idx, name in (
+            piece_model.names.items() if hasattr(piece_model, "names") else []
+        ):
+            if "king" in name.lower() and (
+                "white" in name.lower()
+                or "w-" in name.lower()
+                or name.lower().startswith("w")
+            ):
+                piece_notation_map[idx] = "K"
+                print(
+                    f"  Auto-corrected: Mapping class {idx} ({name}) to white king (K)"
+                )
+                break
+
+    if not has_black_king:
+        print(
+            "WARNING: No black king (k) found in piece mapping! This will cause incorrect FEN notation."
+        )
+
+    return piece_notation_map
 
 
 def connect_square_to_detection(
@@ -336,6 +522,7 @@ def connect_square_to_detection(
         assigned_pieces = set()
 
     list_of_iou = []
+    list_of_confidence = []
     piece_indices = []
 
     # Get square's bottom y-coordinate for determining bottom placement
@@ -345,6 +532,7 @@ def connect_square_to_detection(
         # Skip already assigned pieces
         if i in assigned_pieces:
             list_of_iou.append(0)
+            list_of_confidence.append(0)
             piece_indices.append(i)
             continue
 
@@ -382,17 +570,46 @@ def connect_square_to_detection(
                 iou = iou * 0.1  # Heavily penalize non-bottom placements
 
             list_of_iou.append(iou)
+            # Store confidence value for this detection from boxes
+            list_of_confidence.append(float(boxes.conf[i].item()))
             piece_indices.append(i)
         except Exception as e:
             print(f"Error calculating IOU: {e}")
             list_of_iou.append(0)
+            list_of_confidence.append(0)
             piece_indices.append(i)
 
     if not list_of_iou or max(list_of_iou) <= SQUARE_PIECE_IOU_THRESHOLD:
         return "1"
 
-    num_idx = int(np.argmax(list_of_iou))
-    num = piece_indices[num_idx]
+    # Find all detections with reasonable IoU
+    valid_detections = [
+        (i, iou, conf)
+        for i, (iou, conf) in enumerate(zip(list_of_iou, list_of_confidence))
+        if iou > SQUARE_PIECE_IOU_THRESHOLD
+    ]
+
+    if not valid_detections:
+        return "1"
+
+    # Sort by IoU first (primary criteria)
+    valid_detections.sort(key=lambda x: x[1], reverse=True)
+
+    # If top candidates have similar IoU (within 10% of each other),
+    # then choose the one with highest confidence
+    top_iou = valid_detections[0][1]
+    top_candidates = [det for det in valid_detections if det[1] >= top_iou * 0.9]
+
+    if len(top_candidates) > 1:
+        # Sort by confidence for candidates with similar IoU
+        top_candidates.sort(key=lambda x: x[2], reverse=True)
+        print(
+            f"Multiple detections for square: Selected highest confidence {top_candidates[0][2]:.3f} vs {[f'{c[2]:.3f}' for c in top_candidates[1:]]}"
+        )
+
+    # Get the index of the best candidate
+    best_idx = top_candidates[0][0]
+    num = piece_indices[best_idx]
     assigned_pieces.add(num)  # Mark this piece as assigned
 
     try:
@@ -448,82 +665,8 @@ def process_image(image_path, corner_model, piece_model, show_plots):
         print("Could not proceed due to piece detection failure")
         return None
 
-    print(piece_model.names)
-
     # Create a mapping from model class indices to chess notation
-    piece_notation_map = {}
-    if hasattr(piece_model, "names"):
-        print(piece_model.names)
-
-        # Create mapping from class names to FEN notation - support both naming conventions
-        chess_notation = {
-            # Hyphenated names
-            "white-queen": "Q",
-            "white-king": "K",
-            "white-bishop": "B",
-            "white-knight": "N",
-            "white-rook": "R",
-            "white-pawn": "P",
-            "black-queen": "q",
-            "black-king": "k",
-            "black-bishop": "b",
-            "black-knight": "n",
-            "black-rook": "r",
-            "black-pawn": "p",
-            # Underscore names
-            "white_queen": "Q",
-            "white_king": "K",
-            "white_bishop": "B",
-            "white_knight": "N",
-            "white_rook": "R",
-            "white_pawn": "P",
-            "black_queen": "q",
-            "black_king": "k",
-            "black_bishop": "b",
-            "black_knight": "n",
-            "black_rook": "r",
-            "black_pawn": "p",
-        }
-
-        # Map each class index to its FEN notation
-        for idx, name in piece_model.names.items():
-            # Normalize name by converting to lowercase
-            normalized_name = name.lower()
-
-            # Try direct lookup first
-            if normalized_name in chess_notation:
-                piece_notation_map[idx] = chess_notation[normalized_name]
-            else:
-                # Try replacing hyphens with underscores and vice versa
-                alt_name_underscore = normalized_name.replace("-", "_")
-                alt_name_hyphen = normalized_name.replace("_", "-")
-
-                if alt_name_underscore in chess_notation:
-                    piece_notation_map[idx] = chess_notation[alt_name_underscore]
-                elif alt_name_hyphen in chess_notation:
-                    piece_notation_map[idx] = chess_notation[alt_name_hyphen]
-                else:
-                    print(f"Warning: Unknown piece class '{name}' at index {idx}")
-                    piece_notation_map[idx] = "1"  # Default to empty square
-
-        print(f"Loaded class mapping from model: {piece_notation_map}")
-    else:
-        # Fallback to hardcoded mapping if model doesn't provide names
-        piece_notation_map = {
-            0: "Q",
-            1: "K",
-            2: "B",
-            3: "N",
-            4: "R",
-            5: "P",
-            6: "q",
-            7: "k",
-            8: "b",
-            9: "n",
-            10: "r",
-            11: "p",
-        }
-        print("Using default class mapping (model did not provide names)")
+    piece_notation_map = get_piece_notation_map(piece_model)
 
     # Calculate grid points - using points 1-9 (skipping the padding)
     print("Creating chessboard grid from internal 8x8 region")
@@ -582,7 +725,24 @@ def process_image(image_path, corner_model, piece_model, show_plots):
     for row in board_FEN:
         print(row)
 
-    complete_board_FEN = ["".join(line) for line in board_FEN]
+    # Compile FEN string
+    complete_board_FEN = []
+    for line in board_FEN:
+        # Optimize FEN generation by compressing consecutive empty squares
+        fen_line = ""
+        empty_count = 0
+        for cell in line:
+            if cell == "1":
+                empty_count += 1
+            else:
+                if empty_count > 0:
+                    fen_line += str(empty_count)
+                    empty_count = 0
+                fen_line += cell
+        if empty_count > 0:
+            fen_line += str(empty_count)
+        complete_board_FEN.append(fen_line)
+
     to_FEN = "/".join(complete_board_FEN)
 
     print("\nFinal FEN notation:")
@@ -596,14 +756,24 @@ def process_image(image_path, corner_model, piece_model, show_plots):
     return to_FEN
 
 
-def process_folder(folder_path, corner_model_path, piece_model_path, show_plots):
-    """Process all images in a folder.
+def process_image_parallel(args):
+    """Wrapper function for multiprocessing."""
+    image_path, corner_model, piece_model, show_plots, img_num, total_images = args
+    print(f"\n[{img_num}/{total_images}] Processing {os.path.basename(image_path)}")
+    return image_path, process_image(image_path, corner_model, piece_model, show_plots)
+
+
+def process_folder(
+    folder_path, corner_model_path, piece_model_path, show_plots, num_workers=None
+):
+    """Process all images in a folder using parallel processing.
 
     Args:
         folder_path (str): Path to folder containing chess board images.
         corner_model_path (str): Path to the corner detection model.
         piece_model_path (str): Path to the piece detection model.
         show_plots (bool): Whether to display matplotlib plots.
+        num_workers (int): Number of parallel workers. None means auto-detect.
     """
     if not os.path.isdir(folder_path):
         print(f"ERROR: Folder not found at {folder_path}")
@@ -612,7 +782,7 @@ def process_folder(folder_path, corner_model_path, piece_model_path, show_plots)
     print(f"Processing all images in folder: {folder_path}")
     start_total = time.time()
 
-    # Load models once
+    # Load models once (will be shared across processes)
     corner_model, piece_model = load_models(corner_model_path, piece_model_path)
     if corner_model is None or piece_model is None:
         print("Failed to load models, aborting batch processing")
@@ -625,32 +795,53 @@ def process_folder(folder_path, corner_model_path, piece_model_path, show_plots)
         image_files.extend(glob.glob(os.path.join(folder_path, f"*.{ext.upper()}")))
 
     # Make the list unique
-    image_files = list(set(image_files))
+    image_files = sorted(list(set(image_files)))
 
     if not image_files:
         print(f"No image files found in {folder_path}")
         return
 
-    print(f"Found {len(image_files)} images to process")
+    # Determine optimal number of workers if not specified
+    if num_workers is None:
+        import multiprocessing
 
-    # Process each image
+        num_workers = min(multiprocessing.cpu_count(), len(image_files))
+
+    print(f"Found {len(image_files)} images to process using {num_workers} workers")
+
+    # Process images in parallel
     results = {}
-    for i, image_path in enumerate(image_files):
-        print(
-            f"\n[{i + 1}/{len(image_files)}] Processing {os.path.basename(image_path)}"
-        )
-        fen = process_image(image_path, corner_model, piece_model, show_plots)
-        if fen:
-            results[image_path] = fen
+
+    # Create task arguments
+    tasks = [
+        (image_path, corner_model, piece_model, show_plots, i + 1, len(image_files))
+        for i, image_path in enumerate(image_files)
+    ]
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
+        for image_path, fen in executor.map(process_image_parallel, tasks):
+            if fen:
+                results[image_path] = fen
+                print(f"✓ Completed {os.path.basename(image_path)}")
+            else:
+                print(f"✗ Failed {os.path.basename(image_path)}")
 
     # Summary
     end_total = time.time()
     print("\n=== Summary ===")
     print(f"Processed {len(results)}/{len(image_files)} images successfully")
     print(f"Total batch processing time: {end_total - start_total:.2f} seconds")
+    print(
+        f"Average time per image: {(end_total - start_total) / len(image_files):.2f} seconds"
+    )
+
+    # Create output directory if it doesn't exist
+    output_dir = os.path.join(folder_path, "output")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
 
     # Write results to file
-    result_file = os.path.join(folder_path, "chess_results.txt")
+    result_file = os.path.join(output_dir, "chess_results.txt")
     with open(result_file, "w") as f:
         for img_path, fen in results.items():
             f.write(
@@ -664,7 +855,6 @@ def pipeline(image_path, corner_model_path, piece_model_path, show_plots):
     """Run the chess board analysis pipeline on the given image path."""
     print(f"Starting chess board analysis on {image_path}")
 
-    # Load models
     corner_model, piece_model = load_models(corner_model_path, piece_model_path)
     if corner_model is None or piece_model is None:
         print("Failed to load models, aborting processing")
@@ -708,6 +898,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--no-display", "-nd", action="store_true", help="Disable displaying plots"
     )
+    parser.add_argument(
+        "--workers",
+        "-w",
+        type=int,
+        default=None,
+        help="Number of parallel workers (default: auto-detect)",
+    )
     args = parser.parse_args()
 
     # Check that at least one of image or folder is provided
@@ -716,10 +913,23 @@ if __name__ == "__main__":
         parser.print_help()
         sys.exit(1)
 
+    # Set matplotlib to use non-interactive backend if not showing plots
+    if args.no_display:
+        matplotlib_backend = plt.get_backend()
+        plt.switch_backend("Agg")
+
     # Run processing based on input type
     if args.folder:
         process_folder(
-            args.folder, args.corner_model, args.piece_model, not args.no_display
+            args.folder,
+            args.corner_model,
+            args.piece_model,
+            not args.no_display,
+            args.workers,
         )
     else:
         pipeline(args.image, args.corner_model, args.piece_model, not args.no_display)
+
+    # Restore matplotlib backend if changed
+    if args.no_display:
+        plt.switch_backend(matplotlib_backend)
