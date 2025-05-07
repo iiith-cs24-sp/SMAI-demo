@@ -106,3 +106,11 @@ To format the code:
 ```bash
 uv run ruff format
 ```
+
+## Model training code and output
+
+The model training code is in the jupyter notebooks in the `notebooks` folder.
+
+Also see:
+
+1. <https://iiithydstudents-my.sharepoint.com/personal/ankita_porel_students_iiit_ac_in/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Fankita%5Fporel%5Fstudents%5Fiiit%5Fac%5Fin%2FDocuments%2Fankita&ga=1>
