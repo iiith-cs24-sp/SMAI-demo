@@ -20,8 +20,9 @@ Set up the environment. (Only once)
 
 ```bash
 uv venv
-.venv/Scripts/activate
-uv sync --link-mode=symlink # Install the dependencies
+# .venv/Scripts/activate # Windows
+source .venv/bin/activate # Linux/MacOS
+uv sync --link-mode=symlink # Install the dependencies, use -U to update
 ```
 
 If you want Pytorch (with or without CUDA), you can install it using the `--extra` flag.
